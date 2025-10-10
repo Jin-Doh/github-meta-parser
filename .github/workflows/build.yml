@@ -1,4 +1,4 @@
-name: Go Build
+name: Go Build, Tag, and Release
 
 on:
   push:
@@ -13,12 +13,6 @@ jobs:
       matrix:
         goos: [linux, windows, darwin]
         goarch: [amd64, arm64]
-        # exclude:
-        # Exclude unsupported combinations if any
-        # For example, arm64 on windows-2019 is not supported
-        # - goos: windows
-        #   goarch: arm64
-
     steps:
       - uses: actions/checkout@v4
 
@@ -48,69 +42,81 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: github-meta-${{ matrix.goos }}-${{ matrix.goarch }}
-          # 와일드카드(*)를 사용해 .exe가 붙은 파일도 찾도록 경로 수정
           path: github-meta-${{ matrix.goos }}-${{ matrix.goarch }}*
           retention-days: 1
 
   tag-on-version-change:
-    # main 브랜치에 푸시될 때만 실행되며, build 작업이 성공해야 실행됩니다.
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    # Git 태그를 푸시하려면 contents: write 권한이 필요합니다.
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    # (추가) 다음 잡에서 태그 이름을 사용할 수 있도록 outputs 설정
+    outputs:
+      VERSION_TAG: ${{ steps.get_version.outputs.VERSION_TAG }}
+      IS_NEW_TAG: ${{ steps.check_tag.outputs.IS_NEW_TAG }}
     steps:
-      # 1. 소스 코드 체크아웃
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Git 히스토리를 모두 가져와야 태그 조회가 가능합니다.
           fetch-depth: 0
 
-      # 2. main.go 파일에서 VERSION 상수 값 추출
       - name: Extract version from main.go
         id: get_version
         run: |
-          # main.go 파일에서 'const VERSION = "X.X.X"' 패턴을 찾아 버전 문자열만 추출합니다.
           VERSION_TAG=$(grep 'VERSION *= *"[^"]*"' main.go | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-          
           if [ -z "$VERSION_TAG" ]; then
             echo "VERSION constant not found or format is incorrect in main.go."
             exit 1
           fi
           VERSION_TAG="v$VERSION_TAG"
-          
           echo "Found version tag: $VERSION_TAG"
-          # 다음 스텝에서 사용할 수 있도록 버전 태그를 GitHub 환경 변수에 저장합니다.
-          echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_ENV
+          # (수정) outputs으로 내보내기 위해 값 설정
+          echo "VERSION_TAG=$VERSION_TAG" >> $GITHUB_OUTPUT
 
-      # 3. Git 태그가 이미 존재하는지 확인
       - name: Check if tag already exists
         id: check_tag
         run: |
-          # 원격 저장소에서 해당 태그가 있는지 확인합니다.
-          if git ls-remote --tags origin refs/tags/${{ env.VERSION_TAG }} | grep -q ${{ env.VERSION_TAG }}; then
-            echo "Tag ${{ env.VERSION_TAG }} already exists. Nothing to do."
-            # 다음 스텝을 건너뛰기 위한 플래그 설정
-            echo "SKIP=true" >> $GITHUB_ENV
+          if git ls-remote --tags origin refs/tags/${{ steps.get_version.outputs.VERSION_TAG }} | grep -q ${{ steps.get_version.outputs.VERSION_TAG }}; then
+            echo "Tag ${{ steps.get_version.outputs.VERSION_TAG }} already exists."
+            echo "IS_NEW_TAG=false" >> $GITHUB_OUTPUT
           else
-            echo "Tag ${{ env.VERSION_TAG }} does not exist. Proceeding to tag."
-            echo "SKIP=false" >> $GITHUB_ENV
+            echo "Tag ${{ steps.get_version.outputs.VERSION_TAG }} does not exist. Proceeding to tag."
+            echo "IS_NEW_TAG=true" >> $GITHUB_OUTPUT
           fi
 
-      # 4. Git 태그 생성 및 푸시 (태그가 존재하지 않을 경우에만 실행)
       - name: Create and push tag
-        # 바로 이전 스텝('check_tag')의 결과(SKIP=false)에 따라 이 스텝의 실행 여부를 결정합니다.
-        if: env.SKIP == 'false'
+        if: steps.check_tag.outputs.IS_NEW_TAG == 'true'
         run: |
-          # Git 작업을 위한 사용자 정보 설정
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # 태그 생성
-          git tag ${{ env.VERSION_TAG }}
-          
-          # 생성한 태그를 원격 저장소로 푸시
-          git push origin ${{ env.VERSION_TAG }}
-          echo "Successfully pushed tag ${{ env.VERSION_TAG }}"
+          git tag ${{ steps.get_version.outputs.VERSION_TAG }}
+          git push origin ${{ steps.get_version.outputs.VERSION_TAG }}
+          echo "Successfully pushed tag ${{ steps.get_version.outputs.VERSION_TAG }}"
+
+  # (추가) 릴리즈 생성 및 파일 업로드를 위한 새로운 Job
+  release:
+    needs: tag-on-version-change
+    # (추가) 새로운 태그가 생성되었을 때만 이 Job을 실행
+    if: needs.tag-on-version-change.outputs.IS_NEW_TAG == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      # (추가) build 잡에서 업로드한 모든 아티팩트를 다운로드
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      # (추가) GitHub Release 생성 및 파일 첨부
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # tag-on-version-change 잡에서 생성한 태그 이름을 사용
+          tag_name: ${{ needs.tag-on-version-change.outputs.VERSION_TAG }}
+          # 자동으로 릴리즈 노트를 생성
+          generate_release_notes: true
+          # 다운로드 받은 아티팩트 파일들을 릴리즈에 첨부
+          files: |
+            artifacts/**/*
