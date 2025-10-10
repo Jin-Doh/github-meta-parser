@@ -72,14 +72,15 @@ jobs:
       - name: Extract version from main.go
         id: get_version
         run: |
-          # main.go 파일에서 'const VERSION = "vX.X.X"' 패턴을 찾아 버전 문자열만 추출합니다.
-          # 예시: const VERSION = "v0.1.0" -> v0.1.0
-          VERSION_TAG=$(grep 'const VERSION' main.go | grep -o 'v[0-9]\+\.[0-9]\+\.[0-9]\+')
+          # main.go 파일에서 'const VERSION = "X.X.X"' 패턴을 찾아 버전 문자열만 추출합니다.
+          # 예시: const VERSION = "0.1.0" -> v0.1.0
+          VERSION_TAG=$(grep 'const VERSION' main.go | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
           
           if [ -z "$VERSION_TAG" ]; then
             echo "VERSION constant not found or format is incorrect in main.go."
             exit 1
           fi
+          VERSION_TAG="v$VERSION_TAG"
           
           echo "Found version tag: $VERSION_TAG"
           # 다음 스텝에서 사용할 수 있도록 버전 태그를 GitHub 환경 변수에 저장합니다.
