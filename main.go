@@ -22,22 +22,22 @@ const (
 var (
 	GITHUB_META_URL = "https://api.github.com/meta"
 	AllowedTypes    = []string{}
-	// 대부분의 GitHub 서비스는 443 포트를 사용합니다。
-	// SSH 관련 명확한 키에 대해서만 22 포트를 기본값으로 설정합니다。
+	// 대부분의 GitHub 서비스는 443 포트를 사용합니다.
+	// SSH 관련 명확한 키에 대해서만 22 포트를 기본값으로 설정합니다.
 	defaultPorts = map[string]int{
 		"git":      22,
 		"ssh_keys": 22,
 	}
 )
 
-// FirewallRuleSet은 방화벽 규칙 생성을 위한 정보를 담는 구조체입니다。
+// FirewallRuleSet은 방화벽 규칙 생성을 위한 정보를 담는 구조체입니다.
 type FirewallRuleSet struct {
 	Category string
 	Port     int
 	IPs      []interface{}
 }
 
-// GetMetaDatas 함수는 `GITHUB_META_URL`에 요청을 보내 JSON 응답을 파싱하여 메타 데이터를 반환합니다。
+// GetMetaDatas 함수는 `GITHUB_META_URL`에 요청을 보내 JSON 응답을 파싱하여 메타 데이터를 반환합니다.
 func getMetaDatas() (map[string]interface{}, error) {
 	fmt.Fprintln(os.Stderr, "Fetching latest IP data from GitHub...")
 	resp, err := http.Get(GITHUB_META_URL)
@@ -58,7 +58,7 @@ func getMetaDatas() (map[string]interface{}, error) {
 	return meta, nil
 }
 
-// saveToFile 함수는 메타 데이터를 지정된 위치에 저장합니다。
+// saveToFile 함수는 메타 데이터를 지정된 위치에 저장합니다.
 func saveToFile(ruleSets []FirewallRuleSet, outputDir string, backend string) error {
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		fmt.Printf("Output directory does not exist. Creating: %s\n", outputDir)
@@ -116,7 +116,7 @@ func saveToFile(ruleSets []FirewallRuleSet, outputDir string, backend string) er
 	return nil
 }
 
-// printToStdout 함수는 메타 데이터를 포맷에 맞게 표준 출력으로 출력합니다。
+// printToStdout 함수는 메타 데이터를 포맷에 맞게 표준 출력으로 출력합니다.
 func printToStdout(ruleSets []FirewallRuleSet, backend string) error {
 	// JSON 백엔드의 경우, 보기 좋게 정렬하여 출력
 	if backend == "json" {
@@ -137,7 +137,7 @@ func printToStdout(ruleSets []FirewallRuleSet, backend string) error {
 	for _, rs := range ruleSets {
 		// color 패키지를 통해 출력하면 내부적으로 stderr 등으로 라우팅될 수 있어
 		// 테스트에서 stdout/stderr를 포착할 때 누락되는 문제가 있습니다.
-		// 그래서 헤더는 명시적으로 fmt.Printf로 stdout에 출력합니다。
+		// 그래서 헤더는 명시적으로 fmt.Printf로 stdout에 출력합니다.
 		fmt.Printf("\n#\n# Category: %s, Port: %d (%d entries)\n#\n", rs.Category, rs.Port, len(rs.IPs))
 
 		for _, ip := range rs.IPs {
@@ -243,7 +243,7 @@ func main() {
 
 	var ruleSets []FirewallRuleSet
 
-	// 사용자가 타입을 지정하지 않으면 모든 타입을 기본 포트로 가져옵니다。
+	// 사용자가 타입을 지정하지 않으면 모든 타입을 기본 포트로 가져옵니다.
 	if types == "" || all {
 		for _, key := range AllowedTypes {
 			if ips, ok := meta[key].([]interface{}); ok {
