@@ -7,29 +7,37 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/fatih/color"
 )
 
 const (
-	VERSION            = "0.3.0"
-	GITHUB_META_URL    = "https://api.github.com/meta"
+	VERSION            = "0.4.0"
 	SUPPORTED_BACKENDS = "iptables, netsh, ufw, json"
 )
 
 var (
-	AllowedTypes = []string{}
+	GITHUB_META_URL = "https://api.github.com/meta"
+	AllowedTypes    = []string{}
+	// 대부분의 GitHub 서비스는 443 포트를 사용합니다。
+	// SSH 관련 명확한 키에 대해서만 22 포트를 기본값으로 설정합니다。
+	defaultPorts = map[string]int{
+		"git":      22,
+		"ssh_keys": 22,
+	}
 )
 
-// GetCurrentDir 함수는 명령이 실행된 곳의 위치를 반환합니다.
-func getCurrentDir() string {
-	_, filename, _, _ := runtime.Caller(1)
-	return filepath.Dir(filename)
+// FirewallRuleSet은 방화벽 규칙 생성을 위한 정보를 담는 구조체입니다。
+type FirewallRuleSet struct {
+	Category string
+	Port     int
+	IPs      []interface{}
 }
 
-// GetMetaDatas 함수는 `GITHUB_META_URL`에 요청을 보내 JSON 응답을 파싱하여 메타 데이터를 반환합니다.
+// GetMetaDatas 함수는 `GITHUB_META_URL`에 요청을 보내 JSON 응답을 파싱하여 메타 데이터를 반환합니다。
 func getMetaDatas() (map[string]interface{}, error) {
 	fmt.Fprintln(os.Stderr, "Fetching latest IP data from GitHub...")
 	resp, err := http.Get(GITHUB_META_URL)
@@ -50,18 +58,8 @@ func getMetaDatas() (map[string]interface{}, error) {
 	return meta, nil
 }
 
-// typeCheck 함수는 사용자가 입력한 타입이 Meta 데이터의 키와 일치하는지 확인합니다.
-func typeCheck(t string) bool {
-	for _, at := range AllowedTypes {
-		if t == at {
-			return true
-		}
-	}
-	return false
-}
-
-// saveToFile 함수는 메타 데이터를 지정된 위치에 저장합니다.
-func saveToFile(meta map[string]interface{}, outputDir string, backend string) error {
+// saveToFile 함수는 메타 데이터를 지정된 위치에 저장합니다。
+func saveToFile(ruleSets []FirewallRuleSet, outputDir string, backend string) error {
 	if _, err := os.Stat(outputDir); os.IsNotExist(err) {
 		fmt.Printf("Output directory does not exist. Creating: %s\n", outputDir)
 		if err := os.MkdirAll(outputDir, 0755); err != nil {
@@ -72,42 +70,43 @@ func saveToFile(meta map[string]interface{}, outputDir string, backend string) e
 	// JSON 백엔드의 경우, 모든 데이터를 하나의 파일에 저장
 	if backend == "json" {
 		outputFile := filepath.Join(outputDir, "github_meta.json")
-		jsonData, err := json.MarshalIndent(meta, "", "  ")
+		// JSON 출력용으로 데이터를 재구성합니다.
+		jsonData := make(map[string]interface{})
+		for _, rs := range ruleSets {
+			key := fmt.Sprintf("%s:%d", rs.Category, rs.Port)
+			jsonData[key] = rs.IPs
+		}
+		jsonBytes, err := json.MarshalIndent(jsonData, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal data to JSON: %v", err)
 		}
-		if err := os.WriteFile(outputFile, jsonData, 0644); err != nil {
+		if err := os.WriteFile(outputFile, jsonBytes, 0644); err != nil {
 			return fmt.Errorf("failed to write to file %s: %v", outputFile, err)
 		}
 		color.Green("Saved all data to %s\n", outputFile)
 		return nil
 	}
 
-	for key, value := range meta {
-		ipList, ok := value.([]interface{})
-		if !ok {
-			continue
-		}
-
+	for _, rs := range ruleSets {
 		var lines []string
-		for _, ip := range ipList {
+		for _, ip := range rs.IPs {
 			ipStr, ok := ip.(string)
 			if !ok {
 				continue
 			}
 			switch backend {
 			case "iptables":
-				lines = append(lines, fmt.Sprintf("iptables -A INPUT -p tcp -s %s -j ACCEPT", ipStr))
+				lines = append(lines, fmt.Sprintf("iptables -A INPUT -p tcp -s %s --dport %d -j ACCEPT", ipStr, rs.Port))
 			case "netsh":
-				lines = append(lines, fmt.Sprintf("netsh advfirewall firewall add rule name=\"Allow GitHub %s %s\" dir=in action=allow protocol=TCP remoteip=%s", key, ipStr, ipStr))
+				lines = append(lines, fmt.Sprintf("netsh advfirewall firewall add rule name=\"Allow GitHub %s port %d\" dir=in action=allow protocol=TCP remoteip=%s localport=%d", rs.Category, rs.Port, ipStr, rs.Port))
 			case "ufw":
-				lines = append(lines, fmt.Sprintf("ufw allow from %s to any port 22 comment 'Allow GitHub %s %s'", ipStr, key, ipStr))
+				lines = append(lines, fmt.Sprintf("ufw allow from %s to any port %d comment 'Allow GitHub %s'", ipStr, rs.Port, rs.Category))
 			default:
 				lines = append(lines, ipStr)
 			}
 		}
 
-		outputFile := filepath.Join(outputDir, fmt.Sprintf("%s.txt", key))
+		outputFile := filepath.Join(outputDir, fmt.Sprintf("%s_%d.txt", rs.Category, rs.Port))
 		if err := os.WriteFile(outputFile, []byte(strings.Join(lines, "\n")), 0644); err != nil {
 			return fmt.Errorf("failed to write to file %s: %v", outputFile, err)
 		}
@@ -117,40 +116,42 @@ func saveToFile(meta map[string]interface{}, outputDir string, backend string) e
 	return nil
 }
 
-// printToStdout 함수는 메타 데이터를 포맷에 맞게 표준 출력으로 출력합니다.
-func printToStdout(meta map[string]interface{}, backend string) error {
+// printToStdout 함수는 메타 데이터를 포맷에 맞게 표준 출력으로 출력합니다。
+func printToStdout(ruleSets []FirewallRuleSet, backend string) error {
 	// JSON 백엔드의 경우, 보기 좋게 정렬하여 출력
 	if backend == "json" {
-		jsonData, err := json.MarshalIndent(meta, "", "  ")
+		jsonData := make(map[string]interface{})
+		for _, rs := range ruleSets {
+			key := fmt.Sprintf("%s:%d", rs.Category, rs.Port)
+			jsonData[key] = rs.IPs
+		}
+		jsonBytes, err := json.MarshalIndent(jsonData, "", "  ")
 		if err != nil {
 			return fmt.Errorf("failed to marshal data to JSON: %v", err)
 		}
-		fmt.Println(string(jsonData))
+		fmt.Println(string(jsonBytes))
 		return nil
 	}
 
-	// 다른 백엔드의 경우, 색상있는 헤더로 카테고리 구분
-	header := color.New(color.FgCyan, color.Bold)
-	for key, value := range meta {
-		ipList, ok := value.([]interface{})
-		if !ok {
-			continue
-		}
+	// 다른 백엔드의 경우, 카테고리 구분을 위한 주석 형태 헤더를 표준 출력으로 출력
+	for _, rs := range ruleSets {
+		// color 패키지를 통해 출력하면 내부적으로 stderr 등으로 라우팅될 수 있어
+		// 테스트에서 stdout/stderr를 포착할 때 누락되는 문제가 있습니다.
+		// 그래서 헤더는 명시적으로 fmt.Printf로 stdout에 출력합니다。
+		fmt.Printf("\n#\n# Category: %s, Port: %d (%d entries)\n#\n", rs.Category, rs.Port, len(rs.IPs))
 
-		header.Printf("\n#\n# Category: %s (%d entries)\n#\n", key, len(ipList))
-
-		for _, ip := range ipList {
+		for _, ip := range rs.IPs {
 			ipStr, ok := ip.(string)
 			if !ok {
 				continue
 			}
 			switch backend {
 			case "iptables":
-				fmt.Printf("iptables -A INPUT -p tcp -s %s -j ACCEPT\n", ipStr)
+				fmt.Printf("iptables -A INPUT -p tcp -s %s --dport %d -j ACCEPT\n", ipStr, rs.Port)
 			case "netsh":
-				fmt.Printf("netsh advfirewall firewall add rule name=\"Allow GitHub %s %s\" dir=in action=allow protocol=TCP remoteip=%s\n", key, ipStr, ipStr)
+				fmt.Printf("netsh advfirewall firewall add rule name=\"Allow GitHub %s port %d\" dir=in action=allow protocol=TCP remoteip=%s localport=%d\n", rs.Category, rs.Port, ipStr, rs.Port)
 			case "ufw":
-				fmt.Printf("ufw allow from %s to any port 22 comment 'Allow GitHub %s %s'\n", ipStr, key, ipStr)
+				fmt.Printf("ufw allow from %s to any port %d comment 'Allow GitHub %s'\n", ipStr, rs.Port, rs.Category)
 			default:
 				fmt.Println(ipStr)
 			}
@@ -167,6 +168,7 @@ func main() {
 		backend   string
 		version   bool
 		help      bool
+		listTypes bool
 	)
 
 	flag.Usage = func() {
@@ -176,18 +178,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, "Options:")
 		flag.PrintDefaults()
 		fmt.Fprintln(os.Stderr, "\nExamples:")
-		fmt.Fprintf(os.Stderr, "  # Fetch 'actions' and 'hooks' IPs and print as color-coded ufw rules:\n")
-		fmt.Fprintf(os.Stderr, "  %s --type actions,hooks --backend ufw\n\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "  # Fetch all IPs and save as a single structured JSON file:\n")
-		fmt.Fprintf(os.Stderr, "  %s --backend json --output ./github_ips\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # Fetch 'actions' IPs (default port 443) and 'git' IPs (default port 22) as ufw rules:\n")
+		fmt.Fprintf(os.Stderr, "  %s --type actions,git --backend ufw\n\n", os.Args[0])
+		fmt.Fprintf(os.Stderr, "  # Fetch 'git' IPs for both SSH and HTTPS ports and save as a structured JSON file:\n")
+		fmt.Fprintf(os.Stderr, "  %s --type git:22,git:443 --backend json --output ./github_ips\n", os.Args[0])
 	}
 
 	flag.StringVar(&outputDir, "output", "", "Output directory for the generated files. If not provided, prints to standard output.")
-	flag.StringVar(&types, "type", "", "Comma-separated list of types to fetch. If specified, overrides the default behavior of fetching all types.")
-	flag.BoolVar(&all, "all", false, "Fetch all types (this is the default behavior if --type is not specified).")
+	flag.StringVar(&types, "type", "", "Comma-separated list of types to fetch (e.g., 'actions,git:22'). If not specified, all types are fetched with their default ports.")
+	flag.BoolVar(&all, "all", false, "Fetch all types with their default ports (this is the default behavior if --type is not specified).")
 	flag.StringVar(&backend, "backend", "", fmt.Sprintf("Backend format for output (options: %s)", SUPPORTED_BACKENDS))
 	flag.BoolVar(&version, "version", false, "Show version information.")
 	flag.BoolVar(&help, "help", false, "Show this help message.")
+	flag.BoolVar(&listTypes, "list-types", false, "List all available IP types with their default ports and exit.")
 	flag.Parse()
 
 	if help {
@@ -200,6 +203,32 @@ func main() {
 		return
 	}
 
+	if listTypes {
+		meta, err := getMetaDatas()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error fetching metadata: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Fprintln(os.Stdout, "Available IP types from GitHub Meta API:")
+		var availableTypes []string
+		for key := range meta {
+			if _, ok := meta[key].([]interface{}); ok {
+				availableTypes = append(availableTypes, key)
+			}
+		}
+		sort.Strings(availableTypes)
+
+		for _, key := range availableTypes {
+			port, exists := defaultPorts[key]
+			if !exists {
+				port = 443
+			}
+			fmt.Printf("- %s (default port: %d)\n", key, port)
+		}
+		return
+	}
+
 	meta, err := getMetaDatas()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error fetching metadata: %v\n", err)
@@ -207,41 +236,74 @@ func main() {
 	}
 
 	for key := range meta {
-		AllowedTypes = append(AllowedTypes, key)
+		if _, ok := meta[key].([]interface{}); ok {
+			AllowedTypes = append(AllowedTypes, key)
+		}
 	}
 
-	fetchAll := true
-	if types != "" {
-		fetchAll = false
-	} else if all {
-		fetchAll = true
-	}
+	var ruleSets []FirewallRuleSet
 
-	var selectedMeta map[string]interface{}
-	if fetchAll {
-		selectedMeta = meta
+	// 사용자가 타입을 지정하지 않으면 모든 타입을 기본 포트로 가져옵니다。
+	if types == "" || all {
+		for _, key := range AllowedTypes {
+			if ips, ok := meta[key].([]interface{}); ok {
+				port, exists := defaultPorts[key]
+				if !exists {
+					port = 443 // 기본값이 없는 경우 443으로 설정
+				}
+				ruleSets = append(ruleSets, FirewallRuleSet{Category: key, Port: port, IPs: ips})
+			}
+		}
 	} else {
-		selectedMeta = make(map[string]interface{})
 		typeList := strings.Split(types, ",")
 		for _, t := range typeList {
 			t = strings.TrimSpace(t)
-			if !typeCheck(t) {
-				fmt.Fprintf(os.Stderr, "Error: Invalid type '%s'.\nAllowed types are: %s\n", t, strings.Join(AllowedTypes, ", "))
+			category := t
+			port := 0
+
+			if strings.Contains(t, ":") {
+				parts := strings.Split(t, ":")
+				category = parts[0]
+				var err error
+				port, err = strconv.Atoi(parts[1])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: Invalid port number in '%s'\n", t)
+					os.Exit(1)
+				}
+			} else {
+				var exists bool
+				port, exists = defaultPorts[category]
+				if !exists {
+					port = 443 // 기본값이 없는 경우 443으로 설정
+				}
+			}
+
+			// Validate category
+			validCategory := false
+			for _, at := range AllowedTypes {
+				if category == at {
+					validCategory = true
+					break
+				}
+			}
+			if !validCategory {
+				fmt.Fprintf(os.Stderr, "Error: Invalid type '%s'.\nAllowed types are: %s\n", category, strings.Join(AllowedTypes, ", "))
 				os.Exit(1)
 			}
-			if value, exists := meta[t]; exists {
-				selectedMeta[t] = value
+
+			if ips, ok := meta[category].([]interface{}); ok {
+				ruleSets = append(ruleSets, FirewallRuleSet{Category: category, Port: port, IPs: ips})
 			}
 		}
 	}
 
 	if outputDir == "" {
-		if err := printToStdout(selectedMeta, backend); err != nil {
+		if err := printToStdout(ruleSets, backend); err != nil {
 			fmt.Fprintf(os.Stderr, "Error printing to stdout: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		if err := saveToFile(selectedMeta, outputDir, backend); err != nil {
+		if err := saveToFile(ruleSets, outputDir, backend); err != nil {
 			fmt.Fprintf(os.Stderr, "Error saving files: %v\n", err)
 			os.Exit(1)
 		}
