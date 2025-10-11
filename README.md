@@ -5,7 +5,7 @@ GitHub에서 제공하는 Meta 정보를 기반으로 방화벽 등에서 허용
 
 ## 다운로드 (Download)
 
-가장 쉬운 방법은 **[GitHub Releases](https://github.com/your-username/github-meta/releases)** 페이지에서 자신의 운영체제에 맞는 최신 버전을 다운로드하는 것입니다.
+가장 쉬운 방법은 **[GitHub Releases](../../releases)** 페이지에서 자신의 운영체제에 맞는 최신 버전을 다운로드하는 것입니다.
 실행 파일은 Linux, Windows, macOS에 대해 `amd64` 및 `arm64` 아키텍처로 각각 제공됩니다.
 
 ## 직접 빌드 및 실행 (Build & Run from Source)
