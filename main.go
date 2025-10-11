@@ -30,6 +30,15 @@ var (
 	}
 )
 
+// getDefaultPort는 카테고리에 대한 기본 포트를 반환합니다.
+// 명시적인 기본값이 없으면 443을 반환합니다.
+func getDefaultPort(category string) int {
+	if p, ok := defaultPorts[category]; ok {
+		return p
+	}
+	return 443
+}
+
 // FirewallRuleSet은 방화벽 규칙 생성을 위한 정보를 담는 구조체입니다.
 type FirewallRuleSet struct {
 	Category string
@@ -220,10 +229,7 @@ func main() {
 		sort.Strings(availableTypes)
 
 		for _, key := range availableTypes {
-			port, exists := defaultPorts[key]
-			if !exists {
-				port = 443
-			}
+			port := getDefaultPort(key)
 			fmt.Printf("- %s (default port: %d)\n", key, port)
 		}
 		return
@@ -241,16 +247,19 @@ func main() {
 		}
 	}
 
+	// Create a set for O(1) lookups when validating user input types
+	allowedTypesSet := make(map[string]struct{}, len(AllowedTypes))
+	for _, t := range AllowedTypes {
+		allowedTypesSet[t] = struct{}{}
+	}
+
 	var ruleSets []FirewallRuleSet
 
 	// 사용자가 타입을 지정하지 않으면 모든 타입을 기본 포트로 가져옵니다.
 	if types == "" || all {
 		for _, key := range AllowedTypes {
 			if ips, ok := meta[key].([]interface{}); ok {
-				port, exists := defaultPorts[key]
-				if !exists {
-					port = 443 // 기본값이 없는 경우 443으로 설정
-				}
+				port := getDefaultPort(key)
 				ruleSets = append(ruleSets, FirewallRuleSet{Category: key, Port: port, IPs: ips})
 			}
 		}
@@ -271,22 +280,11 @@ func main() {
 					os.Exit(1)
 				}
 			} else {
-				var exists bool
-				port, exists = defaultPorts[category]
-				if !exists {
-					port = 443 // 기본값이 없는 경우 443으로 설정
-				}
+				port = getDefaultPort(category)
 			}
 
 			// Validate category
-			validCategory := false
-			for _, at := range AllowedTypes {
-				if category == at {
-					validCategory = true
-					break
-				}
-			}
-			if !validCategory {
+			if _, ok := allowedTypesSet[category]; !ok {
 				fmt.Fprintf(os.Stderr, "Error: Invalid type '%s'.\nAllowed types are: %s\n", category, strings.Join(AllowedTypes, ", "))
 				os.Exit(1)
 			}
